@@ -119,43 +119,6 @@ erDiagram
 
 ---
 
-## 🧹 Data cleaning
-
-Issues found in the source data and how the transform step handles them:
-
-- **Home vs. away:** dozens of `home_*` / `away_*` columns become plain IDs, and team details live only in `team`.
-- **Points per quarter:** these came as text shaped like a Python list, and the number of overtimes varies from game to game. They became the `linescore` table, with one row per period. In every game, the periods add up to the final score.
-- **Team records:** the text `"30-14"` became numeric win and loss columns (overall, home and road).
-- **Readable labels:** `CA → California`, `PQ → Quebec` (ESPN's code for it), `RD16 → First Round`. The lookup includes Canadian provinces, since the league plays in Toronto, Vancouver and Montreal.
-- **Out-of-scope games:** the All-Star Game and postponed games are excluded.
-- **Commissioner's Cup:** the source never flags these games (the flag is always `false`). The transform detects them from the game notes and creates `is_commissioners_cup`.
-- **Fixed types:** stats such as `points_in_paint` and `fast_break_points` arrived as text and are now integers.
-- **Player short names:** ESPN sometimes switches formats. The transform prefers the "F. Lastname" pattern.
-- **Jersey per game:** jersey numbers change with trades, so they live in `player_box`, not `player`.
-- **Multiple seasons:** facts from every season are combined; teams, players and arenas keep their most recent version.
-
----
-
-## 📁 Project structure
-
-```
-wnba-engineering/
-├── main.py                      # CLI (click): python main.py execute ...
-├── pyproject.toml
-├── docker/
-│   ├── Dockerfile
-│   ├── Dockerfile.dockerignore
-│   └── docker-compose.yml       # etl service + parquet volumes
-└── wnba_engineering/
-    └── etl/
-        ├── controller.py        # extract · transform · load
-        ├── notebooks/           # exploration
-        ├── pulled_data/         # generated: raw data per season
-        └── transformed_data/    # generated: clean tables per season
-```
-
----
-
 ## 🚀 Getting started
 
 ### 1. Configure the database
