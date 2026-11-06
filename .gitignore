@@ -1,0 +1,35 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+
+# Dados gerados pela pipeline
+data/
+wnba_engineering/etl/pulled_data/
+wnba_engineering/etl/transformed_data/
+
+# dbt
+target/
+logs/
+dbt_packages/
+
+# Evidence
+node_modules/
+.evidence/
+build/
+*.duckdb
+*.duckdb.wal
+
+#notebooks
+*.ipynb
+
+
+# Credenciais (WNBA_PG_URL)
+.env
+
+# lockfile do uv (não versionado)
+uv.lock
+
+# guia pessoal de desenvolvimento
+GUIDE.md
+.python-version
