@@ -11,7 +11,6 @@ ETL_DIR = Path(__file__).resolve().parent
 ROOT_DIR = ETL_DIR.parents[1]
 PULLED_DIR = ETL_DIR / "pulled_data"
 TRANSFORMED_DIR = ETL_DIR / "transformed_data"
-# Postgres da VPS: postgresql://usuario:senha@host:5432/banco (nunca commitar a senha)
 PG_URL_ENV = "WNBA_PG_URL"
 PG_SCHEMA = "wnba"
 
@@ -36,7 +35,7 @@ PRIMARY_KEYS = {
 }
 
 STATE_NAMES = {
-    # EUA
+    # USA
     "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
     "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
     "DC": "District of Columbia", "FL": "Florida", "GA": "Georgia", "HI": "Hawaii",
@@ -316,13 +315,13 @@ def transform(raw: dict[str, pl.DataFrame], season: int) -> dict[str, pl.DataFra
 
 
 def _read_all_seasons(name: str, key: str | None) -> tuple[pl.DataFrame | None, int]:
-    """Junta a tabela de todas as temporadas em transformed_data/.
-    Dimensão (key != None): uma linha por chave, ficando a versão da temporada mais recente."""
-    files = sorted(TRANSFORMED_DIR.glob(f"*/{name}.parquet"))  # a pasta é o ano: ordem crescente
+    """Combine a table across every season in transformed_data/.
+    Dimension (key != None): one row per key, keeping the most recent season's version."""
+    files = sorted(TRANSFORMED_DIR.glob(f"*/{name}.parquet"))  # folder name is the year: ascending order
     if not files:
         return None, 0
 
-    # temporada mais recente primeiro; diagonal_relaxed tolera colunas diferentes entre temporadas
+    # most recent season first; diagonal_relaxed tolerates columns that differ between seasons
     df = pl.concat([pl.read_parquet(f) for f in reversed(files)], how="diagonal_relaxed")
     if key is not None:
         df = df.unique(subset=key, keep="first", maintain_order=True).sort(key)
@@ -330,16 +329,16 @@ def _read_all_seasons(name: str, key: str | None) -> tuple[pl.DataFrame | None, 
 
 
 def load(pg_url: str | None = None, schema: str = PG_SCHEMA) -> None:
-    """Sobe TODAS as temporadas de transformed_data/ para o Postgres (schema `wnba`).
+    """Load EVERY season in transformed_data/ into Postgres (`wnba` schema).
 
-    Cada tabela é recriada (DROP + CREATE) e ganha primary key, tudo numa transação só:
-    se algo falhar no meio, o banco fica como estava.
+    Each table is recreated (DROP + CREATE) with a primary key, all in a single transaction:
+    if anything fails midway, the database is left untouched.
     """
     import adbc_driver_postgresql.dbapi as pg_dbapi
 
     pg_url = pg_url or os.environ.get(PG_URL_ENV)
     if not pg_url:
-        raise RuntimeError(f"defina {PG_URL_ENV}=postgresql://usuario:senha@host:5432/banco")
+        raise RuntimeError(f"set {PG_URL_ENV}=postgresql://user:password@host:5432/database")
 
     with pg_dbapi.connect(pg_url) as conn, conn.cursor() as cur:
         cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
@@ -347,13 +346,13 @@ def load(pg_url: str | None = None, schema: str = PG_SCHEMA) -> None:
         for name, key in TABLES.items():
             df, n_seasons = _read_all_seasons(name, key)
             if df is None:
-                log.warning("load %s: nenhum parquet encontrado, pulando", name)
+                log.warning("load %s: no parquet files found, skipping", name)
                 continue
 
             cur.execute(f'DROP TABLE IF EXISTS "{schema}"."{name}"')
             cur.adbc_ingest(name, df.to_arrow(), mode="create", db_schema_name=schema)
             pk = ", ".join(f'"{c}"' for c in PRIMARY_KEYS[name])
             cur.execute(f'ALTER TABLE "{schema}"."{name}" ADD PRIMARY KEY ({pk})')
-            log.info("load %s.%s: %d linhas (%d temporada(s))", schema, name, df.height, n_seasons)
+            log.info("load %s.%s: %d rows (%d season(s))", schema, name, df.height, n_seasons)
 
         conn.commit()
