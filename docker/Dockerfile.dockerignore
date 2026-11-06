@@ -1,0 +1,11 @@
+# usado automaticamente pelo `docker build -f docker/Dockerfile .`
+.git
+.venv
+.env
+uv.lock
+**/__pycache__
+**/*.py[cod]
+wnba_engineering/etl/notebooks
+wnba_engineering/etl/pulled_data
+wnba_engineering/etl/transformed_data
+data

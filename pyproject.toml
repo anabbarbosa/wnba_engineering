@@ -1,0 +1,26 @@
+[project]
+name = "wnba"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Ana Barbosa", email = "anabbarbosa06@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "adbc-driver-postgresql>=1.13.0",
+    "click>=8.5",
+    "httpx>=0.28.1",
+    "polars>=1.44,<2",  # sportsdataverse 0.1.x exige polars <2
+    "pyarrow>=26.0.1",
+    "sportsdataverse>=0.1.4,<0.2",
+]
+
+[tool.uv]
+package = false
+link-mode = "copy"  # OneDrive não suporta hardlinks
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.4.0",
+]
