@@ -24,15 +24,7 @@ TABLES = {
     "player": "player_id",
 }
 
-PRIMARY_KEYS = {
-    "games": ["game_id"],
-    "linescore": ["game_id", "period"],
-    "player_box": ["game_id", "player_id"],
-    "team_box": ["game_id", "team_id"],
-    "team": ["team_id"],
-    "venue": ["venue_id"],
-    "player": ["player_id"],
-}
+LOAD_ORDER = ["venue", "team", "player", "games", "linescore", "team_box", "player_box"]
 
 STATE_NAMES = {
     # USA
@@ -329,30 +321,35 @@ def _read_all_seasons(name: str, key: str | None) -> tuple[pl.DataFrame | None, 
 
 
 def load(pg_url: str | None = None, schema: str = PG_SCHEMA) -> None:
-    """Load EVERY season in transformed_data/ into Postgres (`wnba` schema).
-
-    Each table is recreated (DROP + CREATE) with a primary key, all in a single transaction:
-    if anything fails midway, the database is left untouched.
-    """
     import adbc_driver_postgresql.dbapi as pg_dbapi
+
+    assert sorted(LOAD_ORDER) == sorted(TABLES), "LOAD_ORDER and TABLES must list the same tables"
 
     pg_url = pg_url or os.environ.get(PG_URL_ENV)
     if not pg_url:
         raise RuntimeError(f"set {PG_URL_ENV}=postgresql://user:password@host:5432/database")
 
     with pg_dbapi.connect(pg_url) as conn, conn.cursor() as cur:
-        cur.execute(f'CREATE SCHEMA IF NOT EXISTS "{schema}"')
+        cur.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name = ANY($2)",
+            parameters=(schema, LOAD_ORDER),
+        )
+        if cur.fetchone()[0] != len(LOAD_ORDER):
+            raise RuntimeError(f"tables missing in schema '{schema}': run the scripts/*.sql files first")
 
-        for name, key in TABLES.items():
-            df, n_seasons = _read_all_seasons(name, key)
+        cur.execute("TRUNCATE " + ", ".join(f'"{schema}"."{t}"' for t in LOAD_ORDER))
+
+        for name in LOAD_ORDER:
+            df, n_seasons = _read_all_seasons(name, TABLES[name])
             if df is None:
                 log.warning("load %s: no parquet files found, skipping", name)
                 continue
 
-            cur.execute(f'DROP TABLE IF EXISTS "{schema}"."{name}"')
-            cur.adbc_ingest(name, df.to_arrow(), mode="create", db_schema_name=schema)
-            pk = ", ".join(f'"{c}"' for c in PRIMARY_KEYS[name])
-            cur.execute(f'ALTER TABLE "{schema}"."{name}" ADD PRIMARY KEY ({pk})')
+            staging = f"stg_{name}"
+            cur.adbc_ingest(staging, df.to_arrow(), mode="replace", temporary=True)
+            cols = ", ".join(f'"{c}"' for c in df.columns)
+            cur.execute(f'INSERT INTO "{schema}"."{name}" ({cols}) SELECT {cols} FROM "{staging}"')
+            cur.execute(f'DROP TABLE "{staging}"')
             log.info("load %s.%s: %d rows (%d season(s))", schema, name, df.height, n_seasons)
 
         conn.commit()
