@@ -1,7 +1,7 @@
 # Imagem do ETL da WNBA.
 #
 # Build (na raiz do repo):
-#   docker build -f docker/Dockerfile -t wnba-etl .
+#   docker build -f wnba_engineering/docker/Dockerfile -t wnba-etl .
 #
 # Rodar (WNBA_PG_URL vem do .env; os volumes guardam os parquets entre execuções,
 # para o load juntar todas as temporadas já processadas):

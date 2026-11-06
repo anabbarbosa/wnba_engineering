@@ -1,4 +1,4 @@
-# usado automaticamente pelo `docker build -f docker/Dockerfile .`
+# usado automaticamente pelo `docker build -f wnba_engineering/docker/Dockerfile .`
 .git
 .venv
 .env

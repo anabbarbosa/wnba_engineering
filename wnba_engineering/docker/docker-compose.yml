@@ -1,0 +1,50 @@
+# WNBA ETL + Postgres.
+#
+# From the repo root:
+#   docker compose --env-file .env -f wnba_engineering/docker/docker-compose.yml up -d db            # start the database
+#   docker compose --env-file .env -f wnba_engineering/docker/docker-compose.yml run --rm etl        # extract + transform + load (2026)
+#   docker compose --env-file .env -f wnba_engineering/docker/docker-compose.yml run --rm etl execute --season 2025 --season 2026
+#
+# Credentials come from the .env file in the repo root (POSTGRES_* and WNBA_PG_URL).
+# On the first start (empty pg_data volume), Postgres runs wnba_engineering/scripts/*.sql
+# in numeric order and creates the schema and tables.
+
+name: wnba
+
+services:
+  db:
+    image: postgres:17
+    env_file:
+      - ../../.env          # POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ../scripts:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"   # e.g. POSTGRES_PORT=5433 if 5432 is already taken on the host
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  etl:
+    build:
+      context: ../..
+      dockerfile: wnba_engineering/docker/Dockerfile
+    image: wnba-etl
+    env_file:
+      - path: ../../.env    # WNBA_PG_URL (host "db" when using the db service above)
+        required: false     # extract/transform run without it; load needs it
+    volumes:
+      - pulled_data:/app/wnba_engineering/etl/pulled_data
+      - transformed_data:/app/wnba_engineering/etl/transformed_data
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["execute"]
+
+volumes:
+  pg_data:
+  pulled_data:
+  transformed_data:
