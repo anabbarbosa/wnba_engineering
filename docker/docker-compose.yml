@@ -1,0 +1,31 @@
+# ETL da WNBA com os parquets em volumes (persistem entre execuções).
+#
+# Na raiz do repo:
+#   docker compose -f docker/docker-compose.yml build
+#   docker compose -f docker/docker-compose.yml run --rm etl                                  # extract + transform + load (2026)
+#   docker compose -f docker/docker-compose.yml run --rm etl execute --season 2025 --season 2026
+#   docker compose -f docker/docker-compose.yml run --rm etl execute --load
+#
+# WNBA_PG_URL vem do .env na raiz do repo.
+
+name: wnba
+
+services:
+  etl:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: wnba-etl
+    env_file:
+      - path: ../.env
+        required: false   # extract/transform rodam sem; o load exige WNBA_PG_URL
+    volumes:
+      - pulled_data:/app/wnba_engineering/etl/pulled_data
+      - transformed_data:/app/wnba_engineering/etl/transformed_data
+    command: ["execute"]
+    # se o Postgres estiver na mesma VPS e escutando só em localhost, descomente:
+    # network_mode: host
+
+volumes:
+  pulled_data:
+  transformed_data:
