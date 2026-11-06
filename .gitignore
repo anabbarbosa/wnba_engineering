@@ -33,3 +33,4 @@ uv.lock
 # guia pessoal de desenvolvimento
 GUIDE.md
 .python-version
+.vscode/settings.json

@@ -37,7 +37,7 @@ flowchart LR
 |---|---|
 | **Extract** | Downloads each season's schedule, team box scores and player box scores, and stores the raw data as Parquet. |
 | **Transform** | Cleans, types and normalizes the data with **Polars**: splits facts from dimensions, parses the embedded JSON, expands abbreviations and drops redundant columns. |
-| **Load** | Combines every processed season and loads it into Postgres in a **single transaction**, with primary keys. |
+| **Load** | Combines every processed season and refills the Postgres tables (created by the [SQL scripts](wnba_engineering/scripts)) in a **single transaction**. |
 
 ---
 
@@ -83,7 +83,7 @@ erDiagram
         int game_id PK
         int player_id PK
         int team_id FK
-        string minutes
+        float minutes
         int points
         int rebounds
         int assists
@@ -121,36 +121,74 @@ erDiagram
 
 ## 🚀 Getting started
 
-### 1. Configure the database
+### 1. Create the `.env`
 
-Create a `.env` file in the project root with your Postgres connection:
+Copy the example and set a password:
+
+```bash
+cp .env.example .env
+```
 
 ```env
-WNBA_PG_URL=postgresql://user:password@host:5432/database
+# Postgres container (used by the db service)
+POSTGRES_USER=wnba
+POSTGRES_PASSWORD=change-me
+POSTGRES_DB=wnba
+
+# connection used by the ETL load
+WNBA_PG_URL=postgresql://wnba:change-me@db:5432/wnba
 ```
 
 > 🔒 `.env` is in `.gitignore`, so your password stays out of the repository.
-> The database user needs permission to create schemas and tables. Tables are created in the `wnba` schema.
+> Use the same password in `POSTGRES_PASSWORD` and `WNBA_PG_URL`.
+> The host is `db` when the ETL runs in Docker, and `localhost` when it runs locally with uv.
 
-### 2a. Run with Docker (recommended)
+### 2. Set up the database
+
+The tables are created by numbered SQL scripts in [`wnba_engineering/scripts/`](wnba_engineering/scripts), run in order:
+
+| Script | Creates |
+|---|---|
+| `01_create_schema.sql` | the `wnba` schema |
+| `02_create_dimensions.sql` | `venue`, `team`, `player` |
+| `03_create_facts.sql` | `games`, `linescore`, `team_box`, `player_box`, with primary and foreign keys |
+| `04_create_indexes.sql` | indexes on the join and filter columns |
+
+**Option A: Postgres in Docker.** The `db` service runs the scripts automatically on its first start:
 
 ```bash
-# build the image
-docker compose -f docker/docker-compose.yml build
+docker compose --env-file .env -f wnba_engineering/docker/docker-compose.yml up -d db
+```
 
+> 💡 If port 5432 is already in use on your machine, uncomment `POSTGRES_PORT=5433` in `.env`.
+> The scripts only run when the database volume is empty. To recreate the tables from scratch, run `down -v` (this erases the data).
+
+**Option B: an existing Postgres (e.g. a VPS).** Run the scripts once with `psql`:
+
+```bash
+for f in wnba_engineering/scripts/*.sql; do psql "$WNBA_PG_URL" -f "$f"; done
+```
+
+The scripts use `IF NOT EXISTS`, so running them again is safe.
+
+### 3. Run the pipeline
+
+**With Docker (recommended):**
+
+```bash
 # full pipeline (extract + transform + load) for the 2026 season
-docker compose -f docker/docker-compose.yml run --rm etl
+docker compose --env-file .env -f wnba_engineering/docker/docker-compose.yml run --rm etl
 
 # choosing steps and seasons
-docker compose -f docker/docker-compose.yml run --rm etl execute --season 2025 --season 2026
-docker compose -f docker/docker-compose.yml run --rm etl execute --transform --load
+docker compose --env-file .env -f wnba_engineering/docker/docker-compose.yml run --rm etl execute --season 2025 --season 2026
+docker compose --env-file .env -f wnba_engineering/docker/docker-compose.yml run --rm etl execute --transform --load
 ```
 
 The Parquet files are stored in the `wnba_pulled_data` and `wnba_transformed_data` volumes, so they persist between runs.
 
 > ⚠️ `docker compose down -v` deletes the volumes. After that, the next load only includes the seasons you process again.
 
-### 2b. Run locally with uv
+**Locally with uv** (with `localhost` in `WNBA_PG_URL`):
 
 ```bash
 uv sync
@@ -167,7 +205,9 @@ uv run --env-file .env main.py execute
 | `execute --load` | only load what is in `transformed_data/` |
 | `execute --season 2025 --season 2026` | multiple seasons (default: `2026`) |
 
-### 3. Query it!
+The load empties and refills the tables on every run, so running it again never duplicates data.
+
+### 4. Query it!
 
 ```sql
 -- season scoring leaders (minimum 10 games)
