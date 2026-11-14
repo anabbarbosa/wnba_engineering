@@ -1,0 +1,59 @@
+# Builds the Courtside dashboard (wnba_engineering/dashboard) and publishes it to GitHub Pages.
+# The site reads the JSON snapshot committed in public/data/ — refresh it locally with
+# `npm run data` (needs the Postgres loaded by the ETL) and commit the result.
+name: Dashboard → GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "wnba_engineering/dashboard/**"
+      - ".github/workflows/dashboard-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: wnba_engineering/dashboard
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: wnba_engineering/dashboard/package-lock.json
+
+      - id: pages
+        uses: actions/configure-pages@v5
+
+      - run: npm ci
+
+      # project pages live under /<repo>/, so assets and data must be resolved from there
+      - run: npm run build -- --base="${{ steps.pages.outputs.base_path }}/"
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: wnba_engineering/dashboard/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
