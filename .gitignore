@@ -34,3 +34,6 @@ uv.lock
 GUIDE.md
 .python-version
 .vscode/settings.json
+
+# dashboard data snapshot published to GitHub Pages (refresh with `npm run data`)
+!wnba_engineering/dashboard/public/data/

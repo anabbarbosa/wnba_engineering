@@ -232,6 +232,8 @@ npm run dev     # http://localhost:3000
 npm run build   # static site in dist/
 ```
 
+**Live site:** https://anabbarbosa.github.io/wnba_engineering/ — published by `.github/workflows/dashboard-pages.yml` on every push to `main` that touches the dashboard (or manually from the Actions tab). GitHub can't reach the local Postgres, so the site serves the JSON snapshot committed in `public/data/`: run `npm run data` and commit the files to update it.
+
 ### 4. Query it!
 
 ```sql

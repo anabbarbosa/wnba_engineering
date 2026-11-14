@@ -1,6 +1,4 @@
 node_modules/
 dist/
-# exported from Postgres by `npm run data`
-public/data/
 # local credentials
 .env
