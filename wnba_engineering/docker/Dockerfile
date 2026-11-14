@@ -1,14 +1,14 @@
 # Imagem do ETL da WNBA.
 #
 # Build (na raiz do repo):
-#   docker build -f docker/Dockerfile -t wnba-etl .
+#   docker build -f wnba_engineering/docker/Dockerfile -t wnba-etl .
 #
 # Rodar (WNBA_PG_URL vem do .env; os volumes guardam os parquets entre execuções,
 # para o load juntar todas as temporadas já processadas):
 #   docker run --rm --env-file .env \
 #     -v wnba-pulled:/app/wnba_engineering/etl/pulled_data \
 #     -v wnba-transformed:/app/wnba_engineering/etl/transformed_data \
-#     wnba-etl execute --season 2026
+#     wnba-etl --etl 1 --season 2026
 
 FROM python:3.14-slim
 
@@ -27,4 +27,4 @@ COPY main.py ./
 COPY wnba_engineering ./wnba_engineering
 
 ENTRYPOINT ["python", "main.py"]
-CMD ["execute"]
+CMD ["--etl", "1"]

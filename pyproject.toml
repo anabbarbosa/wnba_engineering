@@ -13,6 +13,7 @@ dependencies = [
     "httpx>=0.28.1",
     "polars>=1.44,<2",  # sportsdataverse 0.1.x exige polars <2
     "pyarrow>=26.0.1",
+    "python-dotenv>=1.0",
     "sportsdataverse>=0.1.4,<0.2",
 ]
 

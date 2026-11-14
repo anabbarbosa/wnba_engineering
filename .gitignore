@@ -13,9 +13,9 @@ target/
 logs/
 dbt_packages/
 
-# Evidence
+# dashboard (Node)
 node_modules/
-.evidence/
+dist/
 build/
 *.duckdb
 *.duckdb.wal
@@ -33,3 +33,4 @@ uv.lock
 # guia pessoal de desenvolvimento
 GUIDE.md
 .python-version
+.vscode/settings.json
