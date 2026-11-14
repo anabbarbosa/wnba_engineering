@@ -13,9 +13,9 @@ target/
 logs/
 dbt_packages/
 
-# Evidence
+# dashboard (Node)
 node_modules/
-.evidence/
+dist/
 build/
 *.duckdb
 *.duckdb.wal

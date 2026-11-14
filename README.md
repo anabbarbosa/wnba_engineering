@@ -180,8 +180,8 @@ The scripts use `IF NOT EXISTS`, so running them again is safe.
 docker compose --env-file .env -f wnba_engineering/docker/docker-compose.yml run --rm etl
 
 # choosing steps and seasons
-docker compose --env-file .env -f wnba_engineering/docker/docker-compose.yml run --rm etl execute --season 2025 --season 2026
-docker compose --env-file .env -f wnba_engineering/docker/docker-compose.yml run --rm etl execute --transform --load
+docker compose --env-file .env -f wnba_engineering/docker/docker-compose.yml run --rm etl --etl 1 --season 2025 --season 2026
+docker compose --env-file .env -f wnba_engineering/docker/docker-compose.yml run --rm etl --etl 1 --extract 0
 ```
 
 The Parquet files are stored in the `wnba_pulled_data` and `wnba_transformed_data` volumes, so they persist between runs.
@@ -192,20 +192,45 @@ The Parquet files are stored in the `wnba_pulled_data` and `wnba_transformed_dat
 
 ```bash
 uv sync
-uv run --env-file .env main.py execute
+uv run main.py --etl 1
 ```
 
-### ⚙️ `execute` options
+### ⚙️ Options
+
+`main.py` reads `WNBA_PG_URL` from `.env` on its own.
 
 | Command | What runs |
 |---|---|
-| `execute` | all three steps |
-| `execute --extract --transform` | download and transform, without loading into the database |
-| `execute --transform --load` | transform what was already downloaded, then load |
-| `execute --load` | only load what is in `transformed_data/` |
-| `execute --season 2025 --season 2026` | multiple seasons (default: `2026`) |
+| `main.py --etl 1` | the full ETL: extract + transform + load |
+| `main.py --etl 1 --load 0` | download and transform, without loading into the database |
+| `main.py --etl 1 --extract 0` | transform what was already downloaded, then load |
+| `main.py --etl 1 --extract 0 --transform 0` | only load what is in `transformed_data/` |
+| `main.py --etl 1 --season 2025 --season 2026` | multiple seasons (default: `2026`) |
+| `main.py --etl 0 --dashboard 1` | refresh the dashboard data and open it at http://localhost:3000 |
+
+Or use the shortcuts in `launcher.py`:
+
+```bash
+python launcher.py --mode etl              # full ETL
+python launcher.py --mode transform-load   # transform + load, no download
+python launcher.py --mode load             # load only
+python launcher.py --mode dashboard        # refresh and open the dashboard
+python launcher.py --mode all              # ETL + dashboard
+```
 
 The load empties and refills the tables on every run, so running it again never duplicates data.
+
+### 🏀 Dashboard
+
+`wnba_engineering/dashboard` is **Courtside**, a static site (Vite + d3, no framework). `npm run data` dumps the raw tables (`team`, `player`, `games`, `player_box`) from Postgres to `public/data/*.json`, using `WNBA_PG_URL` from the root `.env`; standings, averages, True Shooting % and Game Score are then computed in the browser (`src/data.js`).
+
+```bash
+cd wnba_engineering/dashboard
+npm install
+npm run data    # export from Postgres
+npm run dev     # http://localhost:3000
+npm run build   # static site in dist/
+```
 
 ### 4. Query it!
 
