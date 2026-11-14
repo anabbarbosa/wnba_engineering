@@ -3,7 +3,7 @@
 # From the repo root:
 #   docker compose --env-file .env -f wnba_engineering/docker/docker-compose.yml up -d db            # start the database
 #   docker compose --env-file .env -f wnba_engineering/docker/docker-compose.yml run --rm etl        # extract + transform + load (2026)
-#   docker compose --env-file .env -f wnba_engineering/docker/docker-compose.yml run --rm etl execute --season 2025 --season 2026
+#   docker compose --env-file .env -f wnba_engineering/docker/docker-compose.yml run --rm etl --etl 1 --season 2025 --season 2026
 #
 # Credentials come from the .env file in the repo root (POSTGRES_* and WNBA_PG_URL).
 # On the first start (empty pg_data volume), Postgres runs wnba_engineering/scripts/*.sql
@@ -42,7 +42,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    command: ["execute"]
+    command: ["--etl", "1"]
 
 volumes:
   pg_data:

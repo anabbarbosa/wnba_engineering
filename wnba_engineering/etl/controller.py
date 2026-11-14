@@ -1,18 +1,16 @@
-import argparse
 import logging
-import os
 from pathlib import Path
 
 import polars as pl
 
+from wnba_engineering.controller import UtilsABC
+
 log = logging.getLogger(__name__)
 
 ETL_DIR = Path(__file__).resolve().parent
-ROOT_DIR = ETL_DIR.parents[1]
 PULLED_DIR = ETL_DIR / "pulled_data"
 TRANSFORMED_DIR = ETL_DIR / "transformed_data"
-PG_URL_ENV = "WNBA_PG_URL"
-PG_SCHEMA = "wnba"
+RAW_TABLES = ["schedule", "player_box", "team_box"]
 
 TABLES = {
     "games": None,
@@ -81,275 +79,299 @@ MAX_OT = 4
 PERIOD_NAMES = [f"q{n}" for n in range(1, N_QUARTERS + 1)] + [f"ot{n}" for n in range(1, MAX_OT + 1)]
 
 
-def extract(season: int) -> dict[str, pl.DataFrame]:
-    from sportsdataverse.wnba import (
-        load_wnba_player_boxscore,
-        load_wnba_schedule,
-        load_wnba_team_boxscore,
-    )
+class ETLController(UtilsABC):
 
-    raw = {
-        "schedule": load_wnba_schedule(seasons=season),
-        "player_box": load_wnba_player_boxscore(seasons=season),
-        "team_box": load_wnba_team_boxscore(seasons=season),
-    }
+    def __init__(self):
+        super().__init__()
 
-    out_dir = PULLED_DIR / str(season)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for name, df in raw.items():
-        df.write_parquet(out_dir / f"{name}.parquet")
-        log.info("extract %s: %s -> %s", name, df.shape, out_dir / f"{name}.parquet")
+    def etl(self, seasons=(2026,), extract=True, transform=True, load=True):
+        """run the selected steps for each season; load always uploads every season on disk."""
+        if extract or transform:
+            for season in seasons:
+                log.info("==== season %d ====", season)
+                raw = self.extract(season) if extract else self.read_pulled(season)
+                if transform:
+                    self.transform(raw, season)
+        if load:
+            self.load()
 
-    return raw
+    def read_pulled(self, season: int) -> dict[str, pl.DataFrame]:
+        """read the raw data already downloaded to pulled_data/{season}/ (transform without extract)."""
+        season_dir = PULLED_DIR / str(season)
+        missing = [t for t in RAW_TABLES if not (season_dir / f"{t}.parquet").exists()]
+        if missing:
+            raise FileNotFoundError(f"season {season}: missing {missing} in {season_dir}. Run with --extract 1.")
+        return {t: pl.read_parquet(season_dir / f"{t}.parquet") for t in RAW_TABLES}
+
+    def extract(self, season: int) -> dict[str, pl.DataFrame]:
+        from sportsdataverse.wnba import (
+            load_wnba_player_boxscore,
+            load_wnba_schedule,
+            load_wnba_team_boxscore,
+        )
+
+        raw = {
+            "schedule": load_wnba_schedule(seasons=season),
+            "player_box": load_wnba_player_boxscore(seasons=season),
+            "team_box": load_wnba_team_boxscore(seasons=season),
+        }
+
+        out_dir = PULLED_DIR / str(season)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for name, df in raw.items():
+            df.write_parquet(out_dir / f"{name}.parquet")
+            log.info("extract %s: %s -> %s", name, df.shape, out_dir / f"{name}.parquet")
+
+        return raw
 
 
-# transform
+    @staticmethod
+    def _parse_linescores(side: str) -> list[pl.Expr]:
+        periods = (
+            pl.col(f"{side}_linescores")
+            .str.extract_all(r"'value': (-?[\d.]+)")
+            .list.eval(pl.element().str.extract(r"([\d.]+)$").cast(pl.Float64).cast(pl.Int32))
+        )
+        return [periods.list.get(i, null_on_oob=True).alias(f"{side}_{n}") for i, n in enumerate(PERIOD_NAMES)]
 
-def _parse_linescores(side: str) -> list[pl.Expr]:
-    periods = (
-        pl.col(f"{side}_linescores")
-        .str.extract_all(r"'value': (-?[\d.]+)")
-        .list.eval(pl.element().str.extract(r"([\d.]+)$").cast(pl.Float64).cast(pl.Int32))
-    )
-    return [periods.list.get(i, null_on_oob=True).alias(f"{side}_{n}") for i, n in enumerate(PERIOD_NAMES)]
+
+    @staticmethod
+    def _parse_records(side: str) -> list[pl.Expr]:
+        exprs = []
+        for rec_type in ("total", "home", "road"):
+            summary = pl.col(f"{side}_records").str.extract(rf"'type': '{rec_type}', 'summary': '(\d+-\d+)'")
+            label = "overall" if rec_type == "total" else rec_type
+            exprs += [
+                summary.str.split("-").list.get(0).cast(pl.Int32).alias(f"{side}_{label}_wins"),
+                summary.str.split("-").list.get(1).cast(pl.Int32).alias(f"{side}_{label}_losses"),
+            ]
+        return exprs
 
 
-def _parse_records(side: str) -> list[pl.Expr]:
-    exprs = []
-    for rec_type in ("total", "home", "road"):
-        summary = pl.col(f"{side}_records").str.extract(rf"'type': '{rec_type}', 'summary': '(\d+-\d+)'")
-        label = "overall" if rec_type == "total" else rec_type
-        exprs += [
-            summary.str.split("-").list.get(0).cast(pl.Int32).alias(f"{side}_{label}_wins"),
-            summary.str.split("-").list.get(1).cast(pl.Int32).alias(f"{side}_{label}_losses"),
+    def transform_schedule(self, schedule: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame]:
+        team = (
+            pl.concat([
+                schedule.filter(pl.col("type_abbreviation") != "ALLSTAR")
+                .select([pl.col(f"{s}_{a}").alias(a) for a in TEAM_ATTRS])
+                for s in ("home", "away")
+            ])
+            .unique(subset="id", keep="last")
+            .rename({"id": "team_id"})
+            .sort("team_id")
+        )
+
+        team_attr_cols = [f"{s}_{a}" for s in ("home", "away") for a in TEAM_ATTRS if a != "id"]
+
+        games = (
+            schedule.filter(
+                (pl.col("type_abbreviation") != "ALLSTAR")
+                & (pl.col("status_type_name") != "STATUS_POSTPONED")
+            )
+            .with_columns(
+                *self._parse_linescores("home"), *self._parse_linescores("away"),
+                *self._parse_records("home"), *self._parse_records("away"),
+                pl.col("venue_address_state")
+                .replace_strict(STATE_NAMES, default=pl.col("venue_address_state")),
+            )
+            .drop(*team_attr_cols, "home_linescores", "away_linescores", "home_records", "away_records")
+            .drop(pl.col("^broadcast.*$"))
+            .rename({
+                "home_id": "home_team_id",
+                "away_id": "away_team_id",
+                "status_type_completed": "is_completed",
+                "status_type_name": "game_status",
+                "status_period": "num_periods",
+            })
+            .with_columns(pl.col("num_periods").cast(pl.Int32))
+            .drop(pl.col("^status_.*$"))  
+            .sort("game_date_time")
+        )
+
+        venue = (
+            games.select("venue_id", *VENUE_COLS).unique(subset="venue_id", keep="last")
+            .rename({
+                "venue_full_name": "name",
+                "venue_address_city": "city",
+                "venue_address_state": "state",
+                "venue_indoor": "is_indoor",
+            })
+            .sort("venue_id")
+        )
+
+        def side_periods(side: str) -> pl.DataFrame:
+            return (
+                games.filter("is_completed")  
+                .select("game_id", *[pl.col(f"{side}_{p}").alias(str(n)) for n, p in enumerate(PERIOD_NAMES, 1)])
+                .unpivot(index="game_id", variable_name="period", value_name=f"{side}_points")
+            )
+
+        linescore = (
+            side_periods("home")
+            .join(side_periods("away"), on=["game_id", "period"])
+            .filter(pl.col("home_points").is_not_null() & pl.col("away_points").is_not_null())
+            .with_columns(pl.col("period").cast(pl.Int32))
+            .with_columns((pl.col("period") > N_QUARTERS).alias("is_overtime"))
+            .sort("game_id", "period")
+        )
+
+        games = (
+            games.drop(*VENUE_COLS).drop([f"{s}_{p}" for s in ("home", "away") for p in PERIOD_NAMES]) 
+            .with_columns(
+                pl.col("notes_headline").replace("", None).alias("game_note"),
+                pl.col("notes_headline").str.contains("Commissioner's Cup").alias("is_commissioners_cup"),
+            )
+            .rename({"type_abbreviation": "game_type"})
+            .with_columns(
+                pl.col("game_type")
+                .replace_strict(GAME_TYPE_NAMES, default=pl.col("game_type"))
+                .alias("game_type_name")
+            )
+            .drop(
+                "id",                         
+                "uid",                        
+                "date", "start_date",         
+                "time_valid", "recent",       
+                "format_regulation_periods",  
+                "conference_competition",     
+                "notes_type", "notes_headline",
+                "type_id",                    
+                "away_winner",                
+                "highlights",                 
+                "game_json_url",
+                "play_by_play_available", "PBP", "game_json", "team_box", "player_box",
+            )
+        )
+
+        first_cols = [
+            "game_id", "season", "season_type", "game_type", "game_type_name", "game_note", "is_commissioners_cup",
+            "game_date", "game_date_time",
+            "game_status", "is_completed", "num_periods",
+            "venue_id", "neutral_site", "attendance",
+            "home_team_id", "away_team_id", "home_score", "away_score", "home_winner",
         ]
-    return exprs
+        games = games.select(*first_cols, pl.exclude(first_cols))
+
+        return games, team, venue, linescore
 
 
-def transform_schedule(schedule: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame]:
-    team = (
-        pl.concat([
-            schedule.filter(pl.col("type_abbreviation") != "ALLSTAR")
-            .select([pl.col(f"{s}_{a}").alias(a) for a in TEAM_ATTRS])
-            for s in ("home", "away")
-        ])
-        .unique(subset="id", keep="last")
-        .rename({"id": "team_id"})
-        .sort("team_id")
-    )
+    def transform_player_box(self, player_box: pl.DataFrame, games: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
+        box = player_box.filter(pl.col("game_id").is_in(games["game_id"].implode()))
 
-    team_attr_cols = [f"{s}_{a}" for s in ("home", "away") for a in TEAM_ATTRS if a != "id"]
-
-    games = (
-        schedule.filter(
-            (pl.col("type_abbreviation") != "ALLSTAR")
-            & (pl.col("status_type_name") != "STATUS_POSTPONED")
+        player = (
+            box.sort(
+                pl.col("athlete_short_name").str.contains(r"^\S+\. ").fill_null(False),
+                "game_date_time",
+                descending=True,
+            )
+            .unique(subset="athlete_id", keep="first")
+            .select(list(PLAYER_COLS))
+            .rename(PLAYER_COLS)
+            .sort("player_id")
         )
-        .with_columns(
-            *_parse_linescores("home"), *_parse_linescores("away"),
-            *_parse_records("home"), *_parse_records("away"),
-            pl.col("venue_address_state")
-            .replace_strict(STATE_NAMES, default=pl.col("venue_address_state")),
+
+        box = (
+            box.drop(
+                [f"team_{c}" for c in TEAM_DETAIL_COLS],
+                [f"opponent_team_{c}" for c in TEAM_DETAIL_COLS],
+                "season", "season_type", "game_date", "game_date_time",
+                "home_away", "team_winner", "team_score", "opponent_team_score",
+                *[c for c in PLAYER_COLS if c != "athlete_id"],
+                strict=False,
+            )\
+            .rename({"athlete_id": "player_id", "athlete_jersey": "jersey"})
         )
-        .drop(*team_attr_cols, "home_linescores", "away_linescores", "home_records", "away_records")
-        .drop(pl.col("^broadcast.*$"))
-        .rename({
-            "home_id": "home_team_id",
-            "away_id": "away_team_id",
-            "status_type_completed": "is_completed",
-            "status_type_name": "game_status",
-            "status_period": "num_periods",
-        })
-        .with_columns(pl.col("num_periods").cast(pl.Int32))
-        .drop(pl.col("^status_.*$"))  
-        .sort("game_date_time")
-    )
 
-    venue = (
-        games.select("venue_id", *VENUE_COLS).unique(subset="venue_id", keep="last")
-        .rename({
-            "venue_full_name": "name",
-            "venue_address_city": "city",
-            "venue_address_state": "state",
-            "venue_indoor": "is_indoor",
-        })
-        .sort("venue_id")
-    )
+        return box, player
 
-    def side_periods(side: str) -> pl.DataFrame:
+    def transform_team_box(self, team_box: pl.DataFrame, games: pl.DataFrame) -> pl.DataFrame:
+        str_stats = [
+            "fast_break_points", "points_in_paint", "turnover_points",
+            "largest_lead", "lead_changes", "lead_percentage",
+        ]
+
         return (
-            games.filter("is_completed")  
-            .select("game_id", *[pl.col(f"{side}_{p}").alias(str(n)) for n, p in enumerate(PERIOD_NAMES, 1)])
-            .unpivot(index="game_id", variable_name="period", value_name=f"{side}_points")
+            team_box.filter(pl.col("game_id").is_in(games["game_id"].implode()))
+            .drop(
+                [f"team_{c}" for c in TEAM_DETAIL_COLS],
+                [f"opponent_team_{c}" for c in TEAM_DETAIL_COLS],
+                "season", "season_type", "game_date", "game_date_time",
+                "team_home_away", "team_winner", "team_score", "opponent_team_score",
+                "total_technical_fouls",
+                strict=False,
+            )
+            .with_columns(pl.col(str_stats).cast(pl.Int32))
         )
 
-    linescore = (
-        side_periods("home")
-        .join(side_periods("away"), on=["game_id", "period"])
-        .filter(pl.col("home_points").is_not_null() & pl.col("away_points").is_not_null())
-        .with_columns(pl.col("period").cast(pl.Int32))
-        .with_columns((pl.col("period") > N_QUARTERS).alias("is_overtime"))
-        .sort("game_id", "period")
-    )
+    def transform(self, raw: dict[str, pl.DataFrame], season: int) -> dict[str, pl.DataFrame]:
+        games, team, venue, linescore = self.transform_schedule(raw["schedule"])
+        player_box, player = self.transform_player_box(raw["player_box"], games)
+        team_box = self.transform_team_box(raw["team_box"], games)
 
-    games = (
-        games.drop(*VENUE_COLS).drop([f"{s}_{p}" for s in ("home", "away") for p in PERIOD_NAMES]) 
-        .with_columns(
-            pl.col("notes_headline").replace("", None).alias("game_note"),
-            pl.col("notes_headline").str.contains("Commissioner's Cup").alias("is_commissioners_cup"),
-        )
-        .rename({"type_abbreviation": "game_type"})
-        .with_columns(
-            pl.col("game_type")
-            .replace_strict(GAME_TYPE_NAMES, default=pl.col("game_type"))
-            .alias("game_type_name")
-        )
-        .drop(
-            "id",                         
-            "uid",                        
-            "date", "start_date",         
-            "time_valid", "recent",       
-            "format_regulation_periods",  
-            "conference_competition",     
-            "notes_type", "notes_headline",
-            "type_id",                    
-            "away_winner",                
-            "highlights",                 
-            "game_json_url",
-            "play_by_play_available", "PBP", "game_json", "team_box", "player_box",
-        )
-    )
+        tables = {
+            "games": games,
+            "linescore": linescore,
+            "player_box": player_box,
+            "team_box": team_box,
+            "team": team,
+            "venue": venue,
+            "player": player,
+        }
+        assert tables.keys() == TABLES.keys(), f"tabelas do transform != TABLES: {tables.keys() ^ TABLES.keys()}"
 
-    first_cols = [
-        "game_id", "season", "season_type", "game_type", "game_type_name", "game_note", "is_commissioners_cup",
-        "game_date", "game_date_time",
-        "game_status", "is_completed", "num_periods",
-        "venue_id", "neutral_site", "attendance",
-        "home_team_id", "away_team_id", "home_score", "away_score", "home_winner",
-    ]
-    games = games.select(*first_cols, pl.exclude(first_cols))
+        out_dir = TRANSFORMED_DIR / str(season)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for name, df in tables.items():
+            df.write_parquet(out_dir / f"{name}.parquet")
+            log.info("transform %s: %s -> %s", name, df.shape, out_dir / f"{name}.parquet")
 
-    return games, team, venue, linescore
+        return tables
 
 
+    @staticmethod
+    def _read_all_seasons(name: str, key: str | None) -> tuple[pl.DataFrame | None, int]:
+        """Combine a table across every season in transformed_data/.
+        Dimension (key != None): one row per key, keeping the most recent season's version."""
+        files = sorted(TRANSFORMED_DIR.glob(f"*/{name}.parquet"))  # folder name is the year: ascending order
+        if not files:
+            return None, 0
 
-def transform_player_box(player_box: pl.DataFrame, games: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame]:
-    box = player_box.filter(pl.col("game_id").is_in(games["game_id"].implode()))
-
-    player = (
-        box.sort(
-            pl.col("athlete_short_name").str.contains(r"^\S+\. ").fill_null(False),
-            "game_date_time",
-            descending=True,
-        )
-        .unique(subset="athlete_id", keep="first")
-        .select(list(PLAYER_COLS))
-        .rename(PLAYER_COLS)
-        .sort("player_id")
-    )
-
-    box = (
-        box.drop(
-            [f"team_{c}" for c in TEAM_DETAIL_COLS],
-            [f"opponent_team_{c}" for c in TEAM_DETAIL_COLS],
-            "season", "season_type", "game_date", "game_date_time",
-            "home_away", "team_winner", "team_score", "opponent_team_score",
-            *[c for c in PLAYER_COLS if c != "athlete_id"],
-            strict=False,
-        )\
-        .rename({"athlete_id": "player_id", "athlete_jersey": "jersey"})
-    )
-
-    return box, player
-
-def transform_team_box(team_box: pl.DataFrame, games: pl.DataFrame) -> pl.DataFrame:
-    str_stats = [
-        "fast_break_points", "points_in_paint", "turnover_points",
-        "largest_lead", "lead_changes", "lead_percentage",
-    ]
-
-    return (
-        team_box.filter(pl.col("game_id").is_in(games["game_id"].implode()))
-        .drop(
-            [f"team_{c}" for c in TEAM_DETAIL_COLS],
-            [f"opponent_team_{c}" for c in TEAM_DETAIL_COLS],
-            "season", "season_type", "game_date", "game_date_time",
-            "team_home_away", "team_winner", "team_score", "opponent_team_score",
-            "total_technical_fouls",
-            strict=False,
-        )
-        .with_columns(pl.col(str_stats).cast(pl.Int32))
-    )
-
-def transform(raw: dict[str, pl.DataFrame], season: int) -> dict[str, pl.DataFrame]:
-    games, team, venue, linescore = transform_schedule(raw["schedule"])
-    player_box, player = transform_player_box(raw["player_box"], games)
-    team_box = transform_team_box(raw["team_box"], games)
-
-    tables = {
-        "games": games,
-        "linescore": linescore,
-        "player_box": player_box,
-        "team_box": team_box,
-        "team": team,
-        "venue": venue,
-        "player": player,
-    }
-    assert tables.keys() == TABLES.keys(), f"tabelas do transform != TABLES: {tables.keys() ^ TABLES.keys()}"
-
-    out_dir = TRANSFORMED_DIR / str(season)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for name, df in tables.items():
-        df.write_parquet(out_dir / f"{name}.parquet")
-        log.info("transform %s: %s -> %s", name, df.shape, out_dir / f"{name}.parquet")
-
-    return tables
+        # most recent season first; diagonal_relaxed tolerates columns that differ between seasons
+        df = pl.concat([pl.read_parquet(f) for f in reversed(files)], how="diagonal_relaxed")
+        if key is not None:
+            df = df.unique(subset=key, keep="first", maintain_order=True).sort(key)
+        return df, len(files)
 
 
-def _read_all_seasons(name: str, key: str | None) -> tuple[pl.DataFrame | None, int]:
-    """Combine a table across every season in transformed_data/.
-    Dimension (key != None): one row per key, keeping the most recent season's version."""
-    files = sorted(TRANSFORMED_DIR.glob(f"*/{name}.parquet"))  # folder name is the year: ascending order
-    if not files:
-        return None, 0
+    def load(self) -> None:
+        import adbc_driver_postgresql.dbapi as pg_dbapi
 
-    # most recent season first; diagonal_relaxed tolerates columns that differ between seasons
-    df = pl.concat([pl.read_parquet(f) for f in reversed(files)], how="diagonal_relaxed")
-    if key is not None:
-        df = df.unique(subset=key, keep="first", maintain_order=True).sort(key)
-    return df, len(files)
+        assert sorted(LOAD_ORDER) == sorted(TABLES), "LOAD_ORDER and TABLES must list the same tables"
 
+        if not self.pg_url:
+            raise RuntimeError("set WNBA_PG_URL=postgresql://user:password@host:5432/database in .env")
+        schema = self.pg_schema
 
-def load(pg_url: str | None = None, schema: str = PG_SCHEMA) -> None:
-    import adbc_driver_postgresql.dbapi as pg_dbapi
+        with pg_dbapi.connect(self.pg_url) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT count(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name = ANY($2)",
+                parameters=(schema, LOAD_ORDER),
+            )
+            if cur.fetchone()[0] != len(LOAD_ORDER):
+                raise RuntimeError(f"tables missing in schema '{schema}': run the scripts/*.sql files first")
 
-    assert sorted(LOAD_ORDER) == sorted(TABLES), "LOAD_ORDER and TABLES must list the same tables"
+            cur.execute("TRUNCATE " + ", ".join(f'"{schema}"."{t}"' for t in LOAD_ORDER))
 
-    pg_url = pg_url or os.environ.get(PG_URL_ENV)
-    if not pg_url:
-        raise RuntimeError(f"set {PG_URL_ENV}=postgresql://user:password@host:5432/database")
+            for name in LOAD_ORDER:
+                df, n_seasons = self._read_all_seasons(name, TABLES[name])
+                if df is None:
+                    log.warning("load %s: no parquet files found, skipping", name)
+                    continue
 
-    with pg_dbapi.connect(pg_url) as conn, conn.cursor() as cur:
-        cur.execute(
-            "SELECT count(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name = ANY($2)",
-            parameters=(schema, LOAD_ORDER),
-        )
-        if cur.fetchone()[0] != len(LOAD_ORDER):
-            raise RuntimeError(f"tables missing in schema '{schema}': run the scripts/*.sql files first")
+                staging = f"stg_{name}"
+                cur.adbc_ingest(staging, df.to_arrow(), mode="replace", temporary=True)
+                cols = ", ".join(f'"{c}"' for c in df.columns)
+                cur.execute(f'INSERT INTO "{schema}"."{name}" ({cols}) SELECT {cols} FROM "{staging}"')
+                cur.execute(f'DROP TABLE "{staging}"')
+                log.info("load %s.%s: %d rows (%d season(s))", schema, name, df.height, n_seasons)
 
-        cur.execute("TRUNCATE " + ", ".join(f'"{schema}"."{t}"' for t in LOAD_ORDER))
-
-        for name in LOAD_ORDER:
-            df, n_seasons = _read_all_seasons(name, TABLES[name])
-            if df is None:
-                log.warning("load %s: no parquet files found, skipping", name)
-                continue
-
-            staging = f"stg_{name}"
-            cur.adbc_ingest(staging, df.to_arrow(), mode="replace", temporary=True)
-            cols = ", ".join(f'"{c}"' for c in df.columns)
-            cur.execute(f'INSERT INTO "{schema}"."{name}" ({cols}) SELECT {cols} FROM "{staging}"')
-            cur.execute(f'DROP TABLE "{staging}"')
-            log.info("load %s.%s: %d rows (%d season(s))", schema, name, df.height, n_seasons)
-
-        conn.commit()
+            conn.commit()

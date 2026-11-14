@@ -8,7 +8,7 @@
 #   docker run --rm --env-file .env \
 #     -v wnba-pulled:/app/wnba_engineering/etl/pulled_data \
 #     -v wnba-transformed:/app/wnba_engineering/etl/transformed_data \
-#     wnba-etl execute --season 2026
+#     wnba-etl --etl 1 --season 2026
 
 FROM python:3.14-slim
 
@@ -27,4 +27,4 @@ COPY main.py ./
 COPY wnba_engineering ./wnba_engineering
 
 ENTRYPOINT ["python", "main.py"]
-CMD ["execute"]
+CMD ["--etl", "1"]
